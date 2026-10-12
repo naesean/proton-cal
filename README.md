@@ -17,7 +17,8 @@ The reverse-engineered API details are documented in [docs/](docs/).
 - **Auth**: SRP login, TOTP 2FA, manual CAPTCHA fallback, two-password mode,
   persistent session with automatic token refresh
 - **Credentials**: bridge-style - after `login`, a derived *salted key
-  passphrase* is stored (mode 0600), never your account password
+  passphrase* is stored (mode 0600, encrypted under a session passphrase you
+  choose), never your account password
 - **Calendars**: list; select by ID or name; configurable default
 - **Events**: list, create, update, delete with full client-side PGP
   encrypt/decrypt
@@ -62,8 +63,9 @@ make build        # produces ./proton-cal
 # Print the version and exit
 proton-cal --version
 
-# Authenticate (prompts for username, password and 2FA; stores session +
-# derived key passphrase in ~/.config/proton-cal/, mode 0600)
+# Authenticate (prompts for username, password, 2FA and a session passphrase
+# that encrypts the stored session + derived key passphrase in
+# ~/.config/proton-cal/; later commands prompt for it)
 proton-cal login
 
 # List calendars
@@ -174,9 +176,16 @@ The default calendar (used when no `--calendar` is given, and shown as
 setting; change it with `proton-cal update calendar <name> --make-default`.
 
 `session.json` (same directory, mode 0600) holds the session tokens and the
-derived salted key passphrase. It can unlock your calendar keys but cannot be
-used to log in to your account; delete it (or run `proton-cal logout`) to
-revoke. Your account password is never stored.
+derived salted key passphrase. Together they can unlock your account's private
+keys (mail as well as calendar) but cannot be used to log in to your account.
+By default `login` encrypts the file under a session passphrase you choose
+(Argon2id + AES-256-GCM) and every later command prompts for it on the
+terminal; the passphrase is never stored, and commands refuse to read it from
+piped stdin. `login --no-passphrase` stores the session unencrypted instead,
+which the MCP server needs (it cannot prompt) but leaves it readable by any
+program running as you. Run `proton-cal logout` to revoke the session; with a
+forgotten passphrase it is still removed locally. Your account password is
+never stored.
 
 ### Bootstrap cache
 
@@ -212,7 +221,9 @@ calendar color). `create_event` and `update_event` also take `reminders` (e.g.
 `["15m", "email:1h"]`) and `color` (a Proton color name or hex, or `"default"`
 for the calendar color); `update_event` uses `reminders_mode`
 (`keep`/`inherit`/`none`/`custom`) to pick the reminder behavior. Run
-`proton-cal login` once first.
+`proton-cal login --no-passphrase` once first: the server cannot prompt for a
+session passphrase, so it needs an unencrypted session (see
+[Configuration](#configuration)).
 
 ```json
 {
@@ -285,7 +296,8 @@ crypto in `packages/shared/lib/calendar/`), and
 `pkg/integration` exercises the real Proton API with a real account and
 is opt-in:
 
-1. `proton-cal login` once.
+1. `proton-cal login --no-passphrase` once (the suite cannot prompt for a
+   session passphrase).
 2. `cp pkg/integration/config.example.toml pkg/integration/config.toml`
    and list a **dedicated test calendar** (ID or name) - never your main one.
 3. `make integration`

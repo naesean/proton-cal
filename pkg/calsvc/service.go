@@ -60,8 +60,10 @@ type Service struct {
 
 // New restores an authenticated Service from the persisted session (missing
 // session yields a "run login" error). noCache disables the on-disk bootstrap
-// cache. Call Close when done.
-func New(noCache bool) (*Service, error) {
+// cache. promptPassphrase unlocks a passphrase-protected session; nil means
+// the caller cannot prompt (a protected session then fails with
+// config.ErrSessionLocked). Call Close when done.
+func New(noCache bool, promptPassphrase func() (string, error)) (*Service, error) {
 	cfg, err := config.Load()
 	if err != nil {
 		return nil, fmt.Errorf("loading config: %w", err)
@@ -70,6 +72,7 @@ func New(noCache bool) (*Service, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening session store: %w", err)
 	}
+	store.PromptPassphrase = promptPassphrase
 	client, err := papi.FromSession(store, cfg.EffectiveBaseURL())
 	if errors.Is(err, config.ErrNoSession) {
 		return nil, errors.New("not logged in; run `proton-cal login` first")

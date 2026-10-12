@@ -65,9 +65,12 @@ func LiveService(t *testing.T) (*calsvc.Service, string) {
 			skip = "pkg/integration/config.toml lists no calendars"
 			return
 		}
-		s, err := calsvc.New(true) // no cache: always hit the live API
+		s, err := calsvc.New(true, nil) // no cache: always hit the live API
 		if errors.Is(err, config.ErrNoSession) {
 			skip = "no saved session; run `proton-cal login`"
+			return
+		} else if errors.Is(err, config.ErrSessionLocked) {
+			skip = "saved session is passphrase-protected; run `proton-cal login --no-passphrase`"
 			return
 		} else if err != nil {
 			t.Fatalf("calsvc.New: %v", err)

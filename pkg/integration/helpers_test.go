@@ -120,6 +120,9 @@ func initSuite() {
 	if errors.Is(err, config.ErrNoSession) {
 		setupSkip = skipMessage
 		return
+	} else if errors.Is(err, config.ErrSessionLocked) {
+		setupSkip = "stored session is passphrase-protected; run `proton-cal login --no-passphrase`"
+		return
 	} else if err != nil {
 		errSetup = fmt.Errorf("loading session: %w", err)
 		return

@@ -3,10 +3,12 @@
 //
 // Credential model (bridge-style): Login derives the salted key passphrase
 // once (from the account/mailbox password and the primary key salt) and
-// persists it in the session store alongside the session tokens. The account
-// password itself is never persisted. Later commands restore the session and
-// call UnlockKeys, which unlocks user/address keys from the stored salted
-// passphrase without re-prompting.
+// persists it in the session store alongside the session tokens, by default
+// encrypted under a session passphrase the user chooses at login. The account
+// password itself is never persisted. Later commands restore the session
+// (prompting for the session passphrase when it is protected) and call
+// UnlockKeys, which unlocks user/address keys from the stored salted
+// passphrase without re-prompting for the account password.
 //
 // Scope note (live-verified): GET /core/v4/keys/salts requires the elevated
 // "locked" scope, which a freshly logged-in or restored session may lack
@@ -38,12 +40,29 @@ import (
 
 // Login runs the interactive login flow and persists the session (tokens +
 // salted key passphrase), returning the logged-in username for the caller to
-// persist. Handles captcha (manual token paste) and TOTP; FIDO2-only 2FA and
-// email-code verification are unsupported.
-func Login(ctx context.Context, prompter Prompter, cfg config.Config) (string, error) {
+// persist. With encryptSession the session is sealed under a passphrase
+// prompted for up front (before any network call, so a mismatched
+// confirmation leaves no server-side session behind). Handles captcha (manual
+// token paste) and TOTP; FIDO2-only 2FA and email-code verification are
+// unsupported.
+func Login(ctx context.Context, prompter Prompter, cfg config.Config, encryptSession bool) (string, error) {
 	username, password, err := promptCredentials(prompter, cfg.Username)
 	if err != nil {
 		return "", err
+	}
+
+	store, err := config.NewSessionStore()
+	if err != nil {
+		return "", fmt.Errorf("opening session store: %w", err)
+	}
+	if encryptSession {
+		passphrase, err := promptNewSessionPassphrase(prompter)
+		if err != nil {
+			return "", err
+		}
+		if err := store.EncryptWith(passphrase); err != nil {
+			return "", err
+		}
 	}
 
 	m := papi.NewManager(cfg.EffectiveBaseURL())
@@ -58,10 +77,6 @@ func Login(ctx context.Context, prompter Prompter, cfg config.Config) (string, e
 	// Persist tokens now so the raw client below reads them and any refresh
 	// lands in the store; written again later since the salted key passphrase
 	// needs salts fetched with a working session.
-	store, err := config.NewSessionStore()
-	if err != nil {
-		return "", fmt.Errorf("opening session store: %w", err)
-	}
 	if err := store.Save(config.Session{
 		UID:          a.UID,
 		AccessToken:  a.AccessToken,
@@ -127,6 +142,24 @@ func promptCredentials(prompter Prompter, configured string) (username, password
 		return "", "", errors.New("no password provided")
 	}
 	return username, password, nil
+}
+
+// promptNewSessionPassphrase reads and confirms the passphrase that will
+// encrypt the saved session.
+func promptNewSessionPassphrase(prompter Prompter) (string, error) {
+	prompter.Notify("Choose a passphrase to encrypt the saved session; commands will ask for it on each run.")
+	passphrase, err := prompter.PromptSecret("Session passphrase")
+	if err != nil {
+		return "", fmt.Errorf("reading session passphrase: %w", err)
+	}
+	confirm, err := prompter.PromptSecret("Confirm session passphrase")
+	if err != nil {
+		return "", fmt.Errorf("reading session passphrase: %w", err)
+	}
+	if passphrase != confirm {
+		return "", errors.New("session passphrases do not match")
+	}
+	return passphrase, nil
 }
 
 // authenticate performs SRP login (with captcha fallback) and TOTP 2FA,
@@ -258,17 +291,23 @@ func persistKeyPass(store *config.SessionStore, saltedKeyPass []byte) error {
 }
 
 // Logout best-effort revokes the current session with the API (AuthDelete)
-// and clears the session store. A missing session is not an error.
-func Logout(ctx context.Context) error {
+// and clears the session store. A missing session is not an error. A
+// protected session is unlocked via prompter to revoke it; with a wrong (e.g.
+// forgotten) passphrase it is still removed locally, just not revoked.
+func Logout(ctx context.Context, prompter Prompter) error {
 	store, err := config.NewSessionStore()
 	if err != nil {
 		return fmt.Errorf("opening session store: %w", err)
 	}
+	store.PromptPassphrase = func() (string, error) { return prompter.PromptSecret("Session passphrase") }
 
 	sess, err := store.Load()
-	if errors.Is(err, config.ErrNoSession) {
+	switch {
+	case errors.Is(err, config.ErrNoSession):
 		return nil
-	} else if err != nil {
+	case errors.Is(err, config.ErrWrongPassphrase):
+		prompter.Notify("warning: wrong session passphrase; removing the saved session without revoking it on the server")
+	case err != nil:
 		return fmt.Errorf("loading session: %w", err)
 	}
 

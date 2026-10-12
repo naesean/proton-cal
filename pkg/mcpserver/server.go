@@ -37,7 +37,9 @@ type server struct {
 }
 
 func newServer() *server {
-	return &server{bootstrap: func() (*calsvc.Service, error) { return calsvc.New(false) }}
+	// No passphrase prompt: stdin carries the MCP protocol, so a protected
+	// session fails with config.ErrSessionLocked instead.
+	return &server{bootstrap: func() (*calsvc.Service, error) { return calsvc.New(false, nil) }}
 }
 
 // service returns the cached service, bootstrapping it on first use.

@@ -1,7 +1,9 @@
 // Package config manages the proton-cal configuration directory:
 //
 //   - config.toml: user-editable settings (username, timezone, default calendar)
-//   - session.json: session tokens + derived salted key passphrase (mode 0600)
+//   - session.json: session tokens + derived salted key passphrase (mode 0600),
+//     encrypted under a user-chosen passphrase unless `login --no-passphrase`
+//     was used (see sealed.go)
 //
 // The session file is guarded by a flock'd lock file so concurrent processes
 // (e.g. a running MCP server and a CLI command) do not clobber each other's
@@ -15,6 +17,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
+	"unicode/utf8"
 
 	"github.com/BurntSushi/toml"
 	"github.com/gofrs/flock"
@@ -129,9 +133,21 @@ func (s Session) Valid() bool {
 // ErrNoSession is returned when no session file exists.
 var ErrNoSession = errors.New("no saved session (run `proton-cal login`)")
 
-// SessionStore reads and writes session.json under an advisory file lock.
+// SessionStore reads and writes session.json under an advisory file lock,
+// sealing it when the session is passphrase-protected. Saves follow the format
+// of the last session loaded (or EncryptWith), so token rotations keep a
+// protected session protected and a plaintext one plaintext.
 type SessionStore struct {
 	dir string
+
+	// PromptPassphrase supplies the passphrase that unlocks a protected
+	// session. It is normally called once per store: the derived key is kept
+	// in memory for later loads and saves. Nil means the caller cannot prompt,
+	// so a protected session fails to load with ErrSessionLocked.
+	PromptPassphrase func() (string, error)
+
+	mu  sync.Mutex
+	key *sessionKey // nil: saves write plaintext
 }
 
 // NewSessionStore returns a store rooted at the config directory.
@@ -163,6 +179,13 @@ func (s *SessionStore) loadLocked() (Session, error) {
 	} else if err != nil {
 		return Session{}, err
 	}
+	if isSealed(data) {
+		if data, err = s.unseal(data); err != nil {
+			return Session{}, err
+		}
+	} else {
+		s.setKey(nil)
+	}
 	var sess Session
 	if err := json.Unmarshal(data, &sess); err != nil {
 		return Session{}, fmt.Errorf("parsing session.json: %w", err)
@@ -185,7 +208,70 @@ func (s *SessionStore) saveLocked(sess Session) error {
 	if err != nil {
 		return err
 	}
+	if k := s.getKey(); k != nil {
+		if data, err = k.seal(data); err != nil {
+			return fmt.Errorf("encrypting session: %w", err)
+		}
+	}
 	return writeFileAtomic(s.sessionPath(), data)
+}
+
+// EncryptWith makes subsequent saves seal the session under a key derived
+// from passphrase (with a fresh salt). Login calls it before the first save so
+// the tokens never reach disk in plaintext.
+func (s *SessionStore) EncryptWith(passphrase string) error {
+	if utf8.RuneCountInString(passphrase) < minPassphraseLen {
+		return fmt.Errorf("session passphrase must be at least %d characters", minPassphraseLen)
+	}
+	p, err := newKDFParams()
+	if err != nil {
+		return fmt.Errorf("generating salt: %w", err)
+	}
+	s.setKey(deriveKey(passphrase, p))
+	return nil
+}
+
+// unseal decrypts a sealed session.json, reusing the cached key when it was
+// derived with the file's parameters and otherwise prompting for the
+// passphrase (caching the key only once it has decrypted the file).
+func (s *SessionStore) unseal(data []byte) ([]byte, error) {
+	sealed, err := parseSealed(data)
+	if err != nil {
+		return nil, err
+	}
+	if k := s.getKey(); k != nil && k.kdf.equal(sealed.KDF) {
+		plain, err := k.open(sealed)
+		if err != nil {
+			return nil, fmt.Errorf("decrypting session.json: %w", err)
+		}
+		return plain, nil
+	}
+	if s.PromptPassphrase == nil {
+		return nil, ErrSessionLocked
+	}
+	passphrase, err := s.PromptPassphrase()
+	if err != nil {
+		return nil, fmt.Errorf("reading session passphrase: %w", err)
+	}
+	k := deriveKey(passphrase, sealed.KDF)
+	plain, err := k.open(sealed)
+	if err != nil {
+		return nil, ErrWrongPassphrase
+	}
+	s.setKey(k)
+	return plain, nil
+}
+
+func (s *SessionStore) getKey() *sessionKey {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.key
+}
+
+func (s *SessionStore) setKey(k *sessionKey) {
+	s.mu.Lock()
+	s.key = k
+	s.mu.Unlock()
 }
 
 // UpdateTokens persists rotated session tokens, preserving the stored salted

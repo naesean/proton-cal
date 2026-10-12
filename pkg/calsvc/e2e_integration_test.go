@@ -67,9 +67,12 @@ func liveService(t *testing.T) (*Service, string) {
 			e2eSkip = "pkg/integration/config.toml lists no calendars"
 			return
 		}
-		svc, err := New(true) // no cache: always hit the live API
+		svc, err := New(true, nil) // no cache: always hit the live API
 		if errors.Is(err, config.ErrNoSession) {
 			e2eSkip = "no saved session; run `proton-cal login`"
+			return
+		} else if errors.Is(err, config.ErrSessionLocked) {
+			e2eSkip = "saved session is passphrase-protected; run `proton-cal login --no-passphrase`"
 			return
 		} else if err != nil {
 			t.Fatalf("calsvc.New: %v", err)

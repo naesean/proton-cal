@@ -2,12 +2,14 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 
 	"golang.org/x/term"
 
+	"github.com/cheeseandcereal/proton-cal/pkg/auth"
 	"github.com/cheeseandcereal/proton-cal/pkg/calsvc"
 )
 
@@ -25,12 +27,22 @@ var serviceFactory = newService
 // newService restores the authenticated service from the saved session,
 // wiring human notices (e.g. "Using calendar: ...") to errWriter.
 func newService() (*calsvc.Service, error) {
-	svc, err := calsvc.New(noCache)
+	svc, err := calsvc.New(noCache, promptSessionPassphrase)
 	if err != nil {
 		return nil, err
 	}
 	svc.Notify = func(msg string) { fmt.Fprintln(errWriter, msg) }
 	return svc, nil
+}
+
+// promptSessionPassphrase reads the passphrase of a protected session from the
+// terminal (hidden). It refuses piped stdin so the passphrase is never
+// scripted into files or shell history.
+func promptSessionPassphrase() (string, error) {
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return "", errors.New("the saved session is passphrase-protected; run from a terminal to enter it")
+	}
+	return auth.NewTerminalPrompter().PromptSecret("Session passphrase")
 }
 
 // outputJSON reports whether the global --output flag selected JSON.

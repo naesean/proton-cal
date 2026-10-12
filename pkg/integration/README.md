@@ -7,10 +7,11 @@ build tag.
 ## Prerequisites
 
 1. Log in once with this CLI so a session (with key passphrase) is stored
-   in the real user config dir:
+   in the real user config dir, unencrypted since the suite cannot prompt
+   for a session passphrase:
 
    ```sh
-   proton-cal login
+   proton-cal login --no-passphrase
    ```
 
 2. Create a **dedicated test calendar** in Proton Calendar. Do not use a
